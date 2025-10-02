@@ -5,7 +5,6 @@ from datetime import datetime, time, timedelta
 from flask import Flask
 from threading import Thread
 from groq import Groq
-import random
 
 # ==== Keep Alive server (Render) ====
 app = Flask('')
@@ -29,12 +28,9 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ==== Tokens (z Environment Variables) ====
+# ==== Tokens ====
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-
-# ==== Groq Client ====
-client = Groq(api_key=GROQ_API_KEY)
 
 # ==== Config ====
 CHANNEL_ID = 1396253060745007216   # kanál hlasování
@@ -43,9 +39,24 @@ hlasovali_yes = set()
 hlasovali_no = set()
 hlasovaci_zprava_id = None
 
+# ==== AI klient ====
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+async def ai_respond(prompt: str):
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",  # funkční model zdarma
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
+            max_tokens=100
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"⚠️ Chyba AI: {e}"
+
 # ==== Pomocné funkce ====
 def je_cas(target_time):
-    now = datetime.utcnow() + timedelta(hours=2)  # CZ = UTC+2
+    now = datetime.utcnow() + timedelta(hours=2)  # CZ čas
     return now.hour == target_time.hour and now.minute == target_time.minute
 
 async def posli_souhrn(channel, guild, nadpis="📊 Souhrn hlasování"):
@@ -102,6 +113,13 @@ async def denni_hlasovani():
             await channel.send("⚠️ Nepodařilo se smazat hlasovací zprávu.")
         hlasovaci_zprava_id = None
 
+# ==== Vtipy každé 3 hodiny ====
+@tasks.loop(hours=3)
+async def posli_vtip():
+    channel = bot.get_channel(POKEC_ID)
+    vtip = await ai_respond("Řekni mi krátký a vtipný vtip v češtině.")
+    await channel.send(f"😂 Vtip: {vtip}")
+
 # ==== Reakce ====
 @bot.event
 async def on_raw_reaction_add(payload):
@@ -123,46 +141,20 @@ async def on_raw_reaction_remove(payload):
         elif payload.emoji.name == "❌":
             hlasovali_no.discard(payload.user_id)
 
-# ==== AI odpovědi ====
-async def ai_respond(prompt: str) -> str:
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Odpovídej česky, stručně a přátelsky."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=200
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"⚠️ Chyba AI: {e}"
-
+# ==== AI odpovědi na zmínky ====
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-    if bot.user in message.mentions:
-        reply = await ai_respond(message.content)
-        await message.channel.send(reply)
+    if bot.user.mentioned_in(message):
+        odpoved = await ai_respond(message.content)
+        await message.channel.send(odpoved)
     await bot.process_commands(message)
-
-# ==== Vtipy každých 10 minut ====
-@tasks.loop(minutes=10)
-async def posli_vtip():
-    channel = bot.get_channel(POKEC_ID)
-    vtip = await ai_respond("Řekni mi krátký vtip v češtině.")
-    await channel.send(f"😂 Vtip: {vtip}")
 
 # ==== Ostatní příkazy ====
 @bot.command()
 async def test(ctx):
     await ctx.send("✅ Bot je online a funguje.")
-
-@bot.command()
-async def timecheck(ctx):
-    now = datetime.utcnow() + timedelta(hours=2)
-    await ctx.send(f"🕒 Teď je {now.strftime('%H:%M')} CZ času.")
 
 # ==== Start ====
 @bot.event
