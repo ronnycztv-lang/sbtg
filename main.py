@@ -12,7 +12,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==== Config ====
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-POZICE_CHANNEL_ID = 1393525512462270564  # pevně daný kanál
+POZICE_CHANNEL_ID = 1393525512462270564  # pevně daný kanál #pozice
 
 # Emoji → pozice
 POZICE_EMOJI = {
@@ -23,18 +23,18 @@ POZICE_EMOJI = {
     "🧤": "Brankář (GK)"
 }
 
-# Globální proměnné
+# ==== Globální proměnné ====
 intro_msg_id = None
 status_msg_id = None
 user_choices = {}  # {user_id: [emoji, emoji]}
 
 
-# ==== Setup ====
+# ==== Setup pozice ====
 async def setup_pozice(guild: discord.Guild):
     global intro_msg_id, status_msg_id, user_choices
     user_choices = {}
 
-    channel = bot.get_channel(POZICE_CHANNEL_ID)
+    channel = guild.get_channel(POZICE_CHANNEL_ID)
     if not channel:
         print("❌ Kanál nebyl nalezen!")
         return
@@ -69,40 +69,34 @@ async def setup_pozice(guild: discord.Guild):
 # ==== Update status ====
 async def update_status(guild: discord.Guild):
     global status_msg_id
-    channel = bot.get_channel(POZICE_CHANNEL_ID)
-    if not channel:
+    channel = guild.get_channel(POZICE_CHANNEL_ID)
+    if not channel or not status_msg_id:
         return
 
     msg = await channel.fetch_message(status_msg_id)
 
-    not_done = []
-    done = []
-    one_done = []
+    lines = []
+    total = len([m for m in guild.members if not m.bot])
+    finished = 0
 
     for member in guild.members:
         if member.bot:
             continue
         choices = user_choices.get(member.id, [])
-        if len(choices) == 2:
-            pozice_text = ", ".join([POZICE_EMOJI[c] for c in choices])
-            done.append(f"{member.mention} ✅ ({pozice_text})")
+        if len(choices) == 0:
+            lines.append(f"{member.mention} (0/2)")
         elif len(choices) == 1:
-            one_done.append(f"{member.mention} (1/2)")
-        else:
-            not_done.append(f"{member.mention} (0/2)")
-
-    total = len([m for m in guild.members if not m.bot])
-    finished = len(done)
+            pozice_text = POZICE_EMOJI[choices[0]]
+            lines.append(f"{member.mention} (1/2) – {pozice_text}")
+        elif len(choices) == 2:
+            pozice_text = ", ".join([POZICE_EMOJI[c] for c in choices])
+            lines.append(f"{member.mention} (2/2) ✅ – {pozice_text}")
+            finished += 1
 
     if finished == total and total > 0:
         status_text = "🎉 **Skvělá zpráva! Všichni dali svoje pozice!**"
     else:
-        status_text = (
-            f"✅ **Hotovo (2/2):**\n" + ("\n".join(done) if done else "Nikdo zatím.") +
-            f"\n\n➖ **Jen 1/2:**\n" + ("\n".join(one_done) if one_done else "Nikdo.") +
-            f"\n\n❌ **Žádná pozice (0/2):**\n" + ("\n".join(not_done) if not_done else "Nikdo 🎉") +
-            f"\n\n📊 **Statistika:** {finished}/{total} hráčů má vybrané 2 pozice."
-        )
+        status_text = "\n".join(lines) + f"\n\n📊 **Statistika:** {finished}/{total} hráčů má vybrané 2 pozice."
 
     await msg.edit(content=status_text)
 
@@ -119,24 +113,29 @@ async def on_raw_reaction_add(payload):
         return
 
     guild = bot.get_guild(payload.guild_id)
-    user_choices.setdefault(payload.user_id, [])
     member = guild.get_member(payload.user_id)
+    user_choices.setdefault(payload.user_id, [])
 
     if emoji not in user_choices[payload.user_id]:
         if len(user_choices[payload.user_id]) < 2:
             user_choices[payload.user_id].append(emoji)
-
             # DM podle stavu
-            if len(user_choices[payload.user_id]) == 1:
-                await member.send("ℹ️ Máš vybranou jen **jednu pozici**. Vyber prosím i druhou.")
-            elif len(user_choices[payload.user_id]) == 2:
-                await member.send("✅ Děkujeme, vybral sis **dvě pozice**!")
+            try:
+                if len(user_choices[payload.user_id]) == 1:
+                    await member.send("ℹ️ Máš vybranou jen **jednu pozici**. Vyber prosím i druhou.")
+                elif len(user_choices[payload.user_id]) == 2:
+                    await member.send("✅ Děkujeme, vybral sis **dvě pozice**!")
+            except:
+                pass
         else:
             # nad 2 → smažeme
             channel = bot.get_channel(payload.channel_id)
             msg = await channel.fetch_message(payload.message_id)
             await msg.remove_reaction(emoji, member)
-            await member.send("❌ Můžeš mít jen **dvě pozice**!")
+            try:
+                await member.send("❌ Můžeš mít jen **dvě pozice**!")
+            except:
+                pass
 
     await update_status(guild)
 
@@ -165,7 +164,7 @@ async def remind_no_position():
             choices = user_choices.get(member.id, [])
             if len(choices) == 0:
                 try:
-                    await member.send("⏰ Připomínka: Stále sis **nevybral žádnou pozici** v #pozice.")
+                    await member.send("⏰ Připomínka: Stále sis **nevybral žádnou pozici** v kanálu #pozice.")
                 except:
                     pass
 
