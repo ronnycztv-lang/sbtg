@@ -1,6 +1,7 @@
 import os
+import json
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from flask import Flask
 from threading import Thread
 
@@ -18,6 +19,7 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
+
 # ==== Intents ====
 intents = discord.Intents.default()
 intents.message_content = True
@@ -27,8 +29,9 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==== Config ====
-DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-POZICE_CHANNEL_ID = 1393525512462270564  # ID kanálu #pozice
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+POZICE_CHANNEL_NAME = "pozice"  # název kanálu, ne ID
+DATA_FILE = "data.json"
 
 # Emoji → pozice
 POZICE_EMOJI = {
@@ -39,21 +42,39 @@ POZICE_EMOJI = {
     "🧤": "Brankář (GK)"
 }
 
-intro_msg_id = None
-status_msg_id = None
-user_choices = {}
+# ==== Data ====
+data = {
+    "intro_msg_id": None,
+    "status_msg_id": None,
+    "user_choices": {}
+}
 
-# ==== Setup ====
+# ==== Helpers ====
+def save_data():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def load_data():
+    global data
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+# ==== Setup pozice ====
 async def setup_pozice():
-    global intro_msg_id, status_msg_id, user_choices
-    channel = bot.get_channel(POZICE_CHANNEL_ID)
+    guild = bot.guilds[0]
+    channel = discord.utils.get(guild.text_channels, name=POZICE_CHANNEL_NAME)
+    if not channel:
+        print("❌ Kanál 'pozice' nebyl nalezen!")
+        return
 
-    # 🧹 smažeme všechny zprávy bota v kanálu
+    # smažeme všechny zprávy bota v kanálu
     async for msg in channel.history(limit=100):
         if msg.author == bot.user:
             await msg.delete()
 
-    user_choices = {}  # reset všech voleb
+    data["user_choices"] = {}
+    save_data()
 
     # intro zpráva
     intro_text = (
@@ -68,33 +89,35 @@ async def setup_pozice():
         "🧤 = Brankář (GK)"
     )
     intro_msg = await channel.send(intro_text)
-    intro_msg_id = intro_msg.id
+    data["intro_msg_id"] = intro_msg.id
 
     for e in POZICE_EMOJI.keys():
         await intro_msg.add_reaction(e)
 
     # status zpráva
     status_msg = await channel.send("⏳ Načítám seznam hráčů...")
-    status_msg_id = status_msg.id
+    data["status_msg_id"] = status_msg.id
 
-    await update_status(channel.guild)
+    save_data()
+    await update_status(guild)
 
 # ==== Update status ====
 async def update_status(guild):
-    global status_msg_id
-    channel = bot.get_channel(POZICE_CHANNEL_ID)
+    channel = discord.utils.get(guild.text_channels, name=POZICE_CHANNEL_NAME)
     try:
-        msg = await channel.fetch_message(status_msg_id)
+        msg = await channel.fetch_message(data["status_msg_id"])
     except:
         msg = await channel.send("⏳ Načítám seznam hráčů...")
-        status_msg_id = msg.id
+        data["status_msg_id"] = msg.id
+        save_data()
 
     not_done = []
     done = []
+
     for member in guild.members:
         if member.bot:
             continue
-        choices = user_choices.get(member.id, [])
+        choices = data["user_choices"].get(str(member.id), [])
         if len(choices) == 2:
             pozice_text = ", ".join([POZICE_EMOJI[c] for c in choices])
             done.append(f"{member.mention} ✅ ({pozice_text})")
@@ -105,58 +128,92 @@ async def update_status(guild):
     finished = len(done)
 
     status_text = (
-        f"📢 Tito hráči ještě nemají 2 pozice:\n" + (", ".join(not_done) if not_done else "Nikdo 🎉") +
-        "\n\n✅ **Už vybrali:**\n" + ("\n".join(done) if done else "Nikdo zatím.") +
+        f"✅ **Už vybrali:**\n" + ("\n".join(done) if done else "Nikdo zatím.") +
+        f"\n\n📢 **Tito hráči ještě nemají 2 pozice:**\n" +
+        ("\n".join(not_done) if not_done else "Nikdo 🎉") +
         f"\n\n📊 **Statistika:** {finished}/{total} hráčů má vybrané 2 pozice."
     )
+
     await msg.edit(content=status_text)
 
 # ==== Reakce ====
 @bot.event
 async def on_raw_reaction_add(payload):
-    if payload.channel_id != POZICE_CHANNEL_ID or payload.user_id == bot.user.id:
+    if payload.user_id == bot.user.id:
         return
+
+    guild = bot.get_guild(payload.guild_id)
+    channel = bot.get_channel(payload.channel_id)
+
+    if channel.name != POZICE_CHANNEL_NAME:
+        return
+
     emoji = str(payload.emoji)
     if emoji not in POZICE_EMOJI:
         return
 
-    user_choices.setdefault(payload.user_id, [])
-    if emoji not in user_choices[payload.user_id]:
-        if len(user_choices[payload.user_id]) < 2:
-            user_choices[payload.user_id].append(emoji)
+    data["user_choices"].setdefault(str(payload.user_id), [])
+    if emoji not in data["user_choices"][str(payload.user_id)]:
+        if len(data["user_choices"][str(payload.user_id)]) < 2:
+            data["user_choices"][str(payload.user_id)].append(emoji)
+            save_data()
         else:
-            # smaže nadbytečnou reakci
-            channel = bot.get_channel(payload.channel_id)
+            # smazání nadbytečné reakce
             msg = await channel.fetch_message(payload.message_id)
-            member = payload.member
+            member = guild.get_member(payload.user_id)
             await msg.remove_reaction(emoji, member)
             try:
                 await member.send("❌ Už máš vybrané 2 pozice, další nelze přidat!")
             except:
                 pass
 
-    guild = bot.get_guild(payload.guild_id)
-    if guild:
-        await update_status(guild)
+    await update_status(guild)
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    if payload.channel_id != POZICE_CHANNEL_ID:
+    guild = bot.get_guild(payload.guild_id)
+    channel = bot.get_channel(payload.channel_id)
+    if channel.name != POZICE_CHANNEL_NAME:
         return
+
     emoji = str(payload.emoji)
     if emoji not in POZICE_EMOJI:
         return
-    if payload.user_id in user_choices and emoji in user_choices[payload.user_id]:
-        user_choices[payload.user_id].remove(emoji)
-        guild = bot.get_guild(payload.guild_id)
-        if guild:
-            await update_status(guild)
+
+    if str(payload.user_id) in data["user_choices"] and emoji in data["user_choices"][str(payload.user_id)]:
+        data["user_choices"][str(payload.user_id)].remove(emoji)
+        save_data()
+        await update_status(guild)
+
+# ==== Turnaj reminder ====
+@tasks.loop(hours=3)
+async def turnaj_notifikace():
+    for guild in bot.guilds:
+        channel = discord.utils.get(guild.text_channels, name=POZICE_CHANNEL_NAME)
+        if channel:
+            await channel.send("📢 Připomínka: Dnes je turnaj!")
+
+# ==== Komunikace bota ====
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    if "ahoj bot" in message.content.lower():
+        await message.channel.send(f"Ahoj {message.author.mention} 👋")
+    await bot.process_commands(message)
 
 # ==== Start ====
 @bot.event
 async def on_ready():
     print(f"✅ Přihlášen jako {bot.user}")
-    await setup_pozice()
+    load_data()
+    if not data["intro_msg_id"] or not data["status_msg_id"]:
+        await setup_pozice()
+    else:
+        await update_status(bot.guilds[0])
+
+    if not turnaj_notifikace.is_running():
+        turnaj_notifikace.start()
 
 keep_alive()
 bot.run(DISCORD_TOKEN)
