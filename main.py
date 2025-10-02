@@ -30,7 +30,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==== Config ====
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-POZICE_CHANNEL_NAME = "pozice"  # název kanálu, ne ID
+POZICE_CHANNEL_NAME = "pozice"  # jméno kanálu
 DATA_FILE = "data.json"
 
 # Emoji → pozice
@@ -74,6 +74,8 @@ async def setup_pozice():
             await msg.delete()
 
     data["user_choices"] = {}
+    data["intro_msg_id"] = None
+    data["status_msg_id"] = None
     save_data()
 
     # intro zpráva
@@ -104,9 +106,16 @@ async def setup_pozice():
 # ==== Update status ====
 async def update_status(guild):
     channel = discord.utils.get(guild.text_channels, name=POZICE_CHANNEL_NAME)
-    try:
-        msg = await channel.fetch_message(data["status_msg_id"])
-    except:
+
+    msg = None
+    if data.get("status_msg_id"):
+        try:
+            msg = await channel.fetch_message(data["status_msg_id"])
+        except:
+            pass
+
+    # pokud zpráva neexistuje, vytvoří se jen jedna nová
+    if not msg:
         msg = await channel.send("⏳ Načítám seznam hráčů...")
         data["status_msg_id"] = msg.id
         save_data()
