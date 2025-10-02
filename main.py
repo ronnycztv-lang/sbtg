@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta
 from flask import Flask
 from threading import Thread
 from groq import Groq
+import json
 
 # ==== Keep Alive server (Render) ====
 app = Flask('')
@@ -39,24 +40,23 @@ hlasovali_yes = set()
 hlasovali_no = set()
 hlasovaci_zprava_id = None
 
-# ==== AI klient ====
+# ==== AI klient (zůstává, pro odpovědi na zmínky) ====
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 async def ai_respond(prompt: str):
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",  # funkční model zdarma
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.8,
             max_tokens=100
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"⚠️ Chyba AI: {e}"
 
-# ==== Pomocné funkce ====
+# ==== Denní hlasování ====
 def je_cas(target_time):
-    now = datetime.utcnow() + timedelta(hours=2)  # CZ čas
+    now = datetime.utcnow() + timedelta(hours=2)
     return now.hour == target_time.hour and now.minute == target_time.minute
 
 async def posli_souhrn(channel, guild, nadpis="📊 Souhrn hlasování"):
@@ -71,7 +71,6 @@ async def posli_souhrn(channel, guild, nadpis="📊 Souhrn hlasování"):
 
     await channel.send(report)
 
-# ==== Denní hlasování ====
 @tasks.loop(minutes=1)
 async def denni_hlasovani():
     global hlasovaci_zprava_id, hlasovali_yes, hlasovali_no
@@ -113,14 +112,13 @@ async def denni_hlasovani():
             await channel.send("⚠️ Nepodařilo se smazat hlasovací zprávu.")
         hlasovaci_zprava_id = None
 
-# ==== Vtipy každé 3 hodiny ====
+# ==== TURNaj místo vtipu každé 3 hodiny ====
 @tasks.loop(hours=3)
-async def posli_vtip():
+async def posli_turnaj():
     channel = bot.get_channel(POKEC_ID)
-    vtip = await ai_respond("Řekni mi krátký a vtipný vtip v češtině.")
-    await channel.send(f"😂 Vtip: {vtip}")
+    await channel.send("🎮 **Dnes je turnaj (proti CZ klubům)!**")
 
-# ==== Reakce ====
+# ==== Reakce na emoji v hlasování ====
 @bot.event
 async def on_raw_reaction_add(payload):
     global hlasovali_yes, hlasovali_no
@@ -141,17 +139,17 @@ async def on_raw_reaction_remove(payload):
         elif payload.emoji.name == "❌":
             hlasovali_no.discard(payload.user_id)
 
-# ==== AI odpovědi na zmínky ====
+# ==== Odpovědi na zmínku ====
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
     if bot.user.mentioned_in(message):
-        odpoved = await ai_respond(message.content)
-        await message.channel.send(odpoved)
+        reply = await ai_respond(message.content)
+        await message.channel.send(reply)
     await bot.process_commands(message)
 
-# ==== Ostatní příkazy ====
+# ==== Testovací příkaz ====
 @bot.command()
 async def test(ctx):
     await ctx.send("✅ Bot je online a funguje.")
@@ -162,8 +160,8 @@ async def on_ready():
     print(f"✅ Přihlášen jako {bot.user}")
     if not denni_hlasovani.is_running():
         denni_hlasovani.start()
-    if not posli_vtip.is_running():
-        posli_vtip.start()
+    if not posli_turnaj.is_running():
+        posli_turnaj.start()
 
 keep_alive()
 bot.run(DISCORD_TOKEN)
