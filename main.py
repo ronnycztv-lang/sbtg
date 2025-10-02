@@ -3,7 +3,6 @@ import discord
 from discord.ext import commands
 from flask import Flask
 from threading import Thread
-import json
 
 # ==== Keep Alive (Render) ====
 app = Flask('')
@@ -30,7 +29,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ==== Config ====
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 POZICE_CHANNEL_ID = 1393525512462270564  # ID kanálu #pozice
-DATA_FILE = "pozice.json"
 
 # Emoji → pozice
 POZICE_EMOJI = {
@@ -41,41 +39,23 @@ POZICE_EMOJI = {
     "🧤": "Brankář (GK)"
 }
 
-# globální proměnné
 intro_msg_id = None
 status_msg_id = None
 user_choices = {}
 
-# ==== Persistence ====
-def save_data():
-    data = {
-        "intro_msg_id": intro_msg_id,
-        "status_msg_id": status_msg_id,
-        "user_choices": user_choices
-    }
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-
-def load_data():
-    global intro_msg_id, status_msg_id, user_choices
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            intro_msg_id = data.get("intro_msg_id")
-            status_msg_id = data.get("status_msg_id")
-            user_choices = {int(k): v for k, v in data.get("user_choices", {}).items()}
-
 # ==== Setup ====
 async def setup_pozice():
-    global intro_msg_id, status_msg_id
+    global intro_msg_id, status_msg_id, user_choices
     channel = bot.get_channel(POZICE_CHANNEL_ID)
 
-    # ❗ Jednorázový reset – smaže všechny zprávy v kanálu
+    # 🧹 smažeme všechny zprávy bota v kanálu
     async for msg in channel.history(limit=100):
         if msg.author == bot.user:
             await msg.delete()
 
-    # Intro zpráva s emoji
+    user_choices = {}  # reset všech voleb
+
+    # intro zpráva
     intro_text = (
         "📌 **Přečti si pozorně a vyber max. 2 pozice!**\n"
         "Jakmile vybereš, ❌ **nejde to vrátit zpět.**\n\n"
@@ -93,10 +73,9 @@ async def setup_pozice():
     for e in POZICE_EMOJI.keys():
         await intro_msg.add_reaction(e)
 
-    # Status zpráva
+    # status zpráva
     status_msg = await channel.send("⏳ Načítám seznam hráčů...")
     status_msg_id = status_msg.id
-    save_data()
 
     await update_status(channel.guild)
 
@@ -104,14 +83,11 @@ async def setup_pozice():
 async def update_status(guild):
     global status_msg_id
     channel = bot.get_channel(POZICE_CHANNEL_ID)
-    if not status_msg_id:
-        return
     try:
         msg = await channel.fetch_message(status_msg_id)
     except:
         msg = await channel.send("⏳ Načítám seznam hráčů...")
         status_msg_id = msg.id
-        save_data()
 
     not_done = []
     done = []
@@ -159,7 +135,6 @@ async def on_raw_reaction_add(payload):
             except:
                 pass
 
-    save_data()
     guild = bot.get_guild(payload.guild_id)
     if guild:
         await update_status(guild)
@@ -173,7 +148,6 @@ async def on_raw_reaction_remove(payload):
         return
     if payload.user_id in user_choices and emoji in user_choices[payload.user_id]:
         user_choices[payload.user_id].remove(emoji)
-        save_data()
         guild = bot.get_guild(payload.guild_id)
         if guild:
             await update_status(guild)
@@ -182,7 +156,6 @@ async def on_raw_reaction_remove(payload):
 @bot.event
 async def on_ready():
     print(f"✅ Přihlášen jako {bot.user}")
-    load_data()
     await setup_pozice()
 
 keep_alive()
