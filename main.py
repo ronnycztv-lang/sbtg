@@ -1,10 +1,10 @@
 import os
 import discord
-from discord.ext import commands, tasks
-from datetime import datetime, timedelta
+from discord.ext import commands
 from flask import Flask
 from threading import Thread
 import json
+import re
 
 # ==== Keep Alive server ====
 app = Flask('')
@@ -30,7 +30,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==== Config ====
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-POZICE_CHANNEL_ID = 1393525512462270564  # tvůj kanál #pozice
+POZICE_CHANNEL_ID = 1393525512462270564  # kanál #pozice
 STATUS_FILE = "pozice.json"
 
 # Emoji → pozice
@@ -43,23 +43,30 @@ POZICE_EMOJI = {
 }
 
 status_pozice_id = None
+intro_msg_id = None
 user_choices = {}
 
 # ==== Persistence ====
 def load_data():
-    global status_pozice_id, user_choices
+    global status_pozice_id, user_choices, intro_msg_id
     if os.path.exists(STATUS_FILE):
         with open(STATUS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             status_pozice_id = data.get("status_msg_id")
+            intro_msg_id = data.get("intro_msg_id")
             user_choices = data.get("choices", {})
     else:
         status_pozice_id = None
+        intro_msg_id = None
         user_choices = {}
 
 def save_data():
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"status_msg_id": status_pozice_id, "choices": user_choices}, f, indent=2, ensure_ascii=False)
+        json.dump({
+            "status_msg_id": status_pozice_id,
+            "intro_msg_id": intro_msg_id,
+            "choices": user_choices
+        }, f, indent=2, ensure_ascii=False)
 
 # ==== Helper ====
 async def update_pozice_status(guild):
@@ -80,31 +87,71 @@ async def update_pozice_status(guild):
     text += "\n\n✅ **Už vybrali:**\n"
     if zvolili:
         for m, pos in zvolili.items():
-            member = guild.get_member(int(m))
-            if member:
-                pozice_text = ", ".join(pos)
-                text += f"{member.mention} ✅ ({pozice_text})\n"
+            pozice_text = ", ".join(pos)
+            text += f"{m.mention} ✅ ({pozice_text})\n"
     else:
         text += "Nikdo zatím."
 
     text += f"\n\n📊 **Statistika:** {len(zvolili)}/{len(all_members)} hráčů má vybrané 2 pozice."
 
-    try:
-        if status_pozice_id:
+    if status_pozice_id:
+        try:
             msg = await channel.fetch_message(status_pozice_id)
             await msg.edit(content=text)
-        else:
-            # smaže všechny staré zprávy bota
-            async for msg in channel.history(limit=50):
-                if msg.author == bot.user:
-                    await msg.delete()
+        except:
             new_msg = await channel.send(text)
             status_pozice_id = new_msg.id
             save_data()
-    except:
+    else:
         new_msg = await channel.send(text)
         status_pozice_id = new_msg.id
         save_data()
+
+# Funkce na update přezdívky
+async def update_nickname(member, positions):
+    try:
+        base_name = re.sub(r"\s*\(.*?\)$", "", member.display_name)  # odstraní staré závorky
+        if positions:
+            new_name = f"{base_name} ({', '.join(positions)})"
+        else:
+            new_name = base_name
+        await member.edit(nick=new_name)
+    except discord.Forbidden:
+        print(f"⚠️ Nemám práva změnit přezdívku: {member.display_name}")
+
+# ==== Setup ====
+async def setup_pozice():
+    global intro_msg_id, status_pozice_id
+    channel = bot.get_channel(POZICE_CHANNEL_ID)
+
+    # smaže staré zprávy bota
+    async for msg in channel.history(limit=50):
+        if msg.author == bot.user:
+            await msg.delete()
+
+    # Intro zpráva
+    intro_text = (
+        "📌 **Přečti si pozorně a vyber max. 2 pozice!**\n"
+        "Jakmile vybereš, ❌ **nejde to vrátit zpět.**\n\n"
+        "Každý hráč má možnost zvolit **primární a sekundární pozici.**\n\n"
+        "**Rozdělení pozic:**\n"
+        "⚽ Útočník (LK/PK/HÚ/SÚ)\n"
+        "🎯 Střední záložník (SOZ/SDZ)\n"
+        "🏃 Krajní záložník (LZ/PZ)\n"
+        "🛡️ Obránce (LO/PO/SO)\n"
+        "🧤 Brankář (GK)"
+    )
+    intro_msg = await channel.send(intro_text)
+    intro_msg_id = intro_msg.id
+    for e in POZICE_EMOJI.keys():
+        await intro_msg.add_reaction(e)
+
+    # Status zpráva
+    status_msg = await channel.send("⏳ Načítám seznam hráčů...")
+    status_pozice_id = status_msg.id
+    save_data()
+
+    await update_pozice_status(channel.guild)
 
 # ==== Events ====
 @bot.event
@@ -112,7 +159,10 @@ async def on_ready():
     print(f"✅ Přihlášen jako {bot.user}")
     load_data()
     guild = bot.guilds[0]
-    await update_pozice_status(guild)
+    if not intro_msg_id or not status_pozice_id:
+        await setup_pozice()
+    else:
+        await update_pozice_status(guild)
 
 @bot.event
 async def on_raw_reaction_add(payload):
@@ -142,6 +192,10 @@ async def on_raw_reaction_add(payload):
     save_data()
     await update_pozice_status(payload.member.guild)
 
+    # Update přezdívky
+    if len(user_choices[user_id]) == 2:
+        await update_nickname(payload.member, user_choices[user_id])
+
 @bot.event
 async def on_raw_reaction_remove(payload):
     global user_choices
@@ -157,7 +211,9 @@ async def on_raw_reaction_remove(payload):
         user_choices[user_id].remove(pos)
         save_data()
         guild = bot.get_guild(payload.guild_id)
+        member = guild.get_member(payload.user_id)
         await update_pozice_status(guild)
+        await update_nickname(member, user_choices[user_id])
 
 # ==== Start ====
 keep_alive()
