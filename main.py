@@ -2,24 +2,9 @@ import os
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime, time, timedelta
-from flask import Flask
-from threading import Thread
+from groq import Groq
 
-# ==== Keep Alive server (Render) ====
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot běží!"
-
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-# ==== Discord Intents ====
+# ==== Discord intents ====
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
@@ -27,11 +12,17 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ==== Tokens (z Environment Variables) ====
+# ==== Tokens ====
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+
+# Groq client
+client = Groq(api_key=GROQ_API_KEY)
 
 # ==== Config ====
 CHANNEL_ID = 1396253060745007216   # ID kanálu "hlasování"
+POKEC_ID = 1396254859577004253     # ID kanálu "pokec"
+
 hlasovali_yes = set()              # kdo dal 👍
 hlasovali_no = set()               # kdo dal ❌
 hlasovaci_zprava_id = None         # ID hlasovací zprávy
@@ -54,7 +45,19 @@ async def posli_souhrn(channel, guild, nadpis="📊 Souhrn hlasování"):
 
     await channel.send(report)
 
-# ==== Hlavní smyčka ====
+# ==== AI funkce ====
+async def ai_response(prompt: str) -> str:
+    try:
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"⚠️ Chyba AI: {e}"
+
+# ==== Hlavní smyčka hlasování ====
 @tasks.loop(minutes=1)
 async def denni_hlasovani():
     global hlasovaci_zprava_id, hlasovali_yes, hlasovali_no
@@ -62,7 +65,7 @@ async def denni_hlasovani():
     channel = bot.get_channel(CHANNEL_ID)
     guild = channel.guild
 
-    # Ranní souhrn v 07:00 (předchozí den)
+    # Ranní souhrn v 07:00
     if je_cas(time(7,0)):
         if hlasovaci_zprava_id:
             await posli_souhrn(channel, guild, "📊 Ranní souhrn v 07:00")
@@ -94,15 +97,19 @@ async def denni_hlasovani():
     # Souhrn + smazání v 21:00
     if je_cas(time(21,0)) and hlasovaci_zprava_id:
         await posli_souhrn(channel, guild, "📊 Večerní souhrn ve 21:00")
-
-        # smazání hlasovací zprávy
         try:
             msg = await channel.fetch_message(hlasovaci_zprava_id)
             await msg.delete()
         except:
             await channel.send("⚠️ Nepodařilo se smazat hlasovací zprávu.")
-
         hlasovaci_zprava_id = None
+
+# ==== AI vtip každých 10 minut (do POKEC) ====
+@tasks.loop(minutes=10)
+async def posli_vtip():
+    channel = bot.get_channel(POKEC_ID)
+    joke = await ai_response("Napiš krátký vtip česky, jeden řádek.")
+    await channel.send(f"😂 Vtip: {joke}")
 
 # ==== Reakce ====
 @bot.event
@@ -125,7 +132,7 @@ async def on_raw_reaction_remove(payload):
         elif payload.emoji.name == "❌":
             hlasovali_no.discard(payload.user_id)
 
-# ==== Ostatní příkazy ====
+# ==== Příkazy ====
 @bot.command()
 async def test(ctx):
     await ctx.send("✅ Bot je online a funguje.")
@@ -135,12 +142,30 @@ async def timecheck(ctx):
     now = datetime.utcnow() + timedelta(hours=2)
     await ctx.send(f"🕒 Teď je {now.strftime('%H:%M')} CZ času.")
 
+@bot.command()
+async def ai(ctx, *, prompt: str):
+    odpoved = await ai_response(prompt)
+    await ctx.send(odpoved)
+
+# ==== Reakce na označení ====
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+
+    if bot.user.mentioned_in(message):
+        odpoved = await ai_response(message.content)
+        await message.channel.send(odpoved)
+
+    await bot.process_commands(message)
+
 # ==== Start ====
 @bot.event
 async def on_ready():
     print(f"✅ Přihlášen jako {bot.user}")
     if not denni_hlasovani.is_running():
         denni_hlasovani.start()
+    if not posli_vtip.is_running():
+        posli_vtip.start()
 
-keep_alive()
 bot.run(DISCORD_TOKEN)
