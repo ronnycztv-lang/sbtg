@@ -4,21 +4,22 @@ from discord.ext import commands, tasks
 from datetime import datetime, timedelta
 import json
 
+# ==== TOKEN ====
 TOKEN = os.environ["DISCORD_TOKEN"]
 
-# ID kanálů
-CHANNEL_POZICE = 1393525512462270564
-CHANNEL_TURNAJ = 1396254859577004253
+# ==== ID kanálů ====
+CHANNEL_TURNAJ = 1396254859577004253   # pokec / turnaje
+CHANNEL_POZICE = 1393525512462270564   # pozice
+CHANNEL_HLASOVANI = 1396253060745007216  # hlasování
 
-bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
-
-# Uložené data
-uzivatele_pozice = {}
-status_msg_id = None
+# ==== Soubory ====
 LAST_TURNAJ_FILE = "last_turnaj.txt"
-POZICE_FILE = "pozice.txt"
+POZICE_FILE = "pozice.json"
 
-# Emoji pro pozice
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ==== POZICE ====
 POZICE_EMOJI = {
     "⚽": "Útočník (LK, PK, HÚ, SÚ)",
     "🎯": "Střední záložník (SOZ, SDZ)",
@@ -26,172 +27,214 @@ POZICE_EMOJI = {
     "🛡️": "Obránce (LO, PO, SO)",
     "🧤": "Brankář (GK)"
 }
+pozice_data = {}
+pozice_msg_id = None
+status_pozice_id = None
 
-# --- Pomocné funkce ---
-def save_pozice():
-    with open("pozice.json", "w", encoding="utf-8") as f:
-        json.dump(uzivatele_pozice, f)
+# ==== HLASOVÁNÍ ====
+hlasovani_msg_id = None
+status_hlasovani_id = None
+hlas_data = {}  # {user_id: "👍" / "❌" / "❓"}
 
-def load_pozice():
-    global uzivatele_pozice
-    try:
-        with open("pozice.json", "r", encoding="utf-8") as f:
-            uzivatele_pozice = json.load(f)
-    except FileNotFoundError:
-        uzivatele_pozice = {}
-
-def save_last_turnaj(ts):
-    with open(LAST_TURNAJ_FILE, "w") as f:
-        f.write(str(ts))
-
+# ==== Utility ====
 def load_last_turnaj():
     try:
         with open(LAST_TURNAJ_FILE, "r") as f:
-            return float(f.read().strip())
+            return datetime.fromisoformat(f.read().strip())
     except:
-        return 0
+        return None
 
-def save_nehlasujici_txt(nehlasujici):
-    with open(POZICE_FILE, "w", encoding="utf-8") as f:
-        for radek in nehlasujici:
-            f.write(radek + "\n")
+def save_last_turnaj(time):
+    with open(LAST_TURNAJ_FILE, "w") as f:
+        f.write(time.isoformat())
 
-# --- UPDATE nehlasujících ---
-async def update_nehlasujici():
-    global status_msg_id
-    channel = bot.get_channel(CHANNEL_POZICE)
-    guild = channel.guild
+def load_pozice():
+    global pozice_data
+    try:
+        with open(POZICE_FILE, "r") as f:
+            pozice_data = json.load(f)
+    except:
+        pozice_data = {}
 
-    nehlasujici = []
-    for m in guild.members:
-        if m.bot:
-            continue
-        pocet = len(uzivatele_pozice.get(str(m.id), []))
-        if pocet < 2:
-            nehlasujici.append(f"{m.mention} ({pocet}/2)")
+def save_pozice():
+    with open(POZICE_FILE, "w") as f:
+        json.dump(pozice_data, f)
 
-    text = "📢 Tito hráči ještě nemají 2 pozice:\n"
-    text += ", ".join(nehlasujici) if nehlasujici else "✅ Všichni už mají vybráno!"
+# ==== TURNaj ====
+@tasks.loop(minutes=1)
+async def turnaj_loop():
+    await bot.wait_until_ready()
+    channel = bot.get_channel(CHANNEL_TURNAJ)
 
-    save_nehlasujici_txt(nehlasujici)
+    last = load_last_turnaj()
+    now = datetime.utcnow() + timedelta(hours=2)
+    if not last or (now - last).total_seconds() >= 3*3600:
+        async for msg in channel.history(limit=100):
+            if msg.author == bot.user:
+                await msg.delete()
+        await channel.send("@everyone 📢 **Dnes je turnaj proti CZ klubům! Připravte se a nezapomeňte hlasovat.**")
+        save_last_turnaj(now)
 
-    if status_msg_id:
-        try:
-            msg = await channel.fetch_message(status_msg_id)
-            await msg.edit(content=text)
-        except:
-            new_msg = await channel.send(text)
-            status_msg_id = new_msg.id
-    else:
-        new_msg = await channel.send(text)
-        status_msg_id = new_msg.id
-
-# --- Inicializace zprávy s pozicemi ---
+# ==== POZICE ====
 async def setup_pozice():
-    global status_msg_id
+    global pozice_msg_id, status_pozice_id
     channel = bot.get_channel(CHANNEL_POZICE)
-
-    # smaže staré zprávy
-    await channel.purge(limit=50)
+    async for msg in channel.history(limit=100):
+        if msg.author == bot.user:
+            await msg.delete()
 
     embed = discord.Embed(
         title="📌 Přečti si pozorně a vyber max. 2 pozice!",
-        description="Jakmile vybereš, **nejde to vrátit zpět. ⛔**\n\n"
-                    "Každý hráč má možnost zvolit **primární a sekundární pozici.**\n\n"
-                    "**Rozdělení pozic:**\n"
-                    "⚽ Útočník (LK, PK, HÚ, SÚ)\n"
-                    "🎯 Střední záložník (SOZ, SDZ)\n"
-                    "🏃 Krajní záložník (LZ, PZ)\n"
-                    "🛡️ Obránce (LO, PO, SO)\n"
-                    "🧤 Brankář (GK)\n",
+        description="Jakmile vybereš, **nejde to vrátit zpět. ⛔**\n\n" +
+                    "\n".join([f"{e} {t}" for e, t in POZICE_EMOJI.items()]),
         color=discord.Color.red()
     )
-
     msg = await channel.send(embed=embed)
+    pozice_msg_id = msg.id
+    for e in POZICE_EMOJI.keys():
+        await msg.add_reaction(e)
 
-    # přidá reakce
-    for emoji in POZICE_EMOJI.keys():
-        await msg.add_reaction(emoji)
+    status = await channel.send("📢 Seznam se načítá...")
+    status_pozice_id = status.id
+    await update_pozice_status(channel.guild)
 
-    status_msg_id = None
-    await update_nehlasujici()
+async def update_pozice_status(guild):
+    channel = bot.get_channel(CHANNEL_POZICE)
+    msg = await channel.fetch_message(status_pozice_id)
+    text = "📢 Tito hráči ještě nemají 2 pozice:\n"
+    for m in guild.members:
+        if not m.bot:
+            pocet = len(pozice_data.get(str(m.id), []))
+            if pocet < 2:
+                text += f"{m.mention} ({pocet}/2)\n"
+    await msg.edit(content=text)
 
-# --- Eventy ---
+# ==== Reakce na pozice ====
+@bot.event
+async def on_raw_reaction_add(payload):
+    # ---- POZICE ----
+    if payload.channel_id == CHANNEL_POZICE and str(payload.emoji) in POZICE_EMOJI:
+        uid = str(payload.user_id)
+        if uid not in pozice_data:
+            pozice_data[uid] = []
+        if len(pozice_data[uid]) >= 2:
+            channel = bot.get_channel(payload.channel_id)
+            msg = await channel.fetch_message(payload.message_id)
+            await msg.remove_reaction(payload.emoji, payload.member)
+            try:
+                await payload.member.send("❌ Už máš vybrané 2 pozice, další nemůžeš přidat!")
+            except: pass
+            return
+        pozice_data[uid].append(str(payload.emoji))
+        save_pozice()
+        await update_pozice_status(payload.member.guild)
+        msg = await bot.get_channel(payload.channel_id).fetch_message(payload.message_id)
+        await msg.remove_reaction(payload.emoji, bot.user)
+        if len(pozice_data[uid]) == 2:
+            try:
+                await payload.member.send("✅ Díky! Vybral sis 2 pozice.")
+            except: pass
+
+    # ---- HLASOVÁNÍ ----
+    if payload.channel_id == CHANNEL_HLASOVANI and str(payload.emoji) in ["👍","❌","❓"]:
+        uid = str(payload.user_id)
+        if payload.user_id == bot.user.id: return
+        hlas_data[uid] = str(payload.emoji)
+
+        # vždy jen 1 reakce
+        channel = bot.get_channel(payload.channel_id)
+        msg = await channel.fetch_message(payload.message_id)
+        for e in ["👍","❌","❓"]:
+            if e != str(payload.emoji):
+                await msg.remove_reaction(e, payload.member)
+
+        # DM feedback
+        try:
+            if str(payload.emoji) == "👍":
+                await payload.member.send("✅ Jsme rádi, že dorazíš na trénink!")
+            elif str(payload.emoji) == "❌":
+                await payload.member.send("⚠️ Nezapomeň se omluvit spoluhráčům, že nepřijdeš.")
+        except: pass
+
+        await update_hlasovani_status(payload.member.guild)
+
+# ==== Hlasování ====
+async def start_hlasovani():
+    global hlasovani_msg_id, status_hlasovani_id
+    channel = bot.get_channel(CHANNEL_HLASOVANI)
+    async for msg in channel.history(limit=100):
+        if msg.author == bot.user:
+            await msg.delete()
+
+    msg = await channel.send("🗳️ **Kdo jde na trénink?**\n👍 = Jdu\n❌ = Nejdou\n❓ = Ještě nevím")
+    hlasovani_msg_id = msg.id
+    for e in ["👍","❌","❓"]:
+        await msg.add_reaction(e)
+
+    guild = channel.guild
+    for m in guild.members:
+        if not m.bot:
+            hlas_data[str(m.id)] = "❓"
+
+    status = await channel.send("📢 Hlasování se načítá...")
+    status_hlasovani_id = status.id
+    await update_hlasovani_status(guild)
+
+async def update_hlasovani_status(guild):
+    channel = bot.get_channel(CHANNEL_HLASOVANI)
+    msg = await channel.fetch_message(status_hlasovani_id)
+
+    yes = [m.mention for m in guild.members if hlas_data.get(str(m.id))=="👍"]
+    no = [m.mention for m in guild.members if hlas_data.get(str(m.id))=="❌"]
+    maybe = [m.mention for m in guild.members if hlas_data.get(str(m.id))=="❓"]
+
+    text = "📊 **Souhrn hlasování:**\n"
+    text += f"👍 Půjdou: {', '.join(yes) if yes else 'Nikdo'}\n"
+    text += f"❌ Nepůjdou: {', '.join(no) if no else 'Nikdo'}\n"
+    text += f"❓ Nehlasovali: {', '.join(maybe) if maybe else 'Nikdo'}"
+    await msg.edit(content=text)
+
+# ==== Denní smyčka ====
+@tasks.loop(minutes=1)
+async def denni_hlasovani():
+    now = datetime.utcnow() + timedelta(hours=2)
+
+    # 08:00 = nové hlasování
+    if now.hour == 8 and now.minute == 0:
+        await start_hlasovani()
+
+    # Připomínky
+    if (now.hour, now.minute) in [(16,0), (17,0), (18,0)]:
+        channel = bot.get_channel(CHANNEL_HLASOVANI)
+        nehlasujici = [m.mention for m in channel.guild.members if hlas_data.get(str(m.id))=="❓"]
+        if nehlasujici:
+            await channel.send(f"⏰ Připomínka! Ještě nehlasovali: {', '.join(nehlasujici)}")
+
+    # Poslední výzva 19:00
+    if now.hour == 19 and now.minute == 0:
+        channel = bot.get_channel(CHANNEL_HLASOVANI)
+        nehlasujici = [m.mention for m in channel.guild.members if hlas_data.get(str(m.id))=="❓"]
+        if nehlasujici:
+            await channel.send(f"⚠️ Poslední výzva před tréninkem! Nehlasovali: {', '.join(nehlasujici)}")
+
+    # Souhrn + smazání v 21:00
+    if now.hour == 21 and now.minute == 0 and hlasovani_msg_id:
+        channel = bot.get_channel(CHANNEL_HLASOVANI)
+        await update_hlasovani_status(channel.guild)
+        try:
+            msg = await channel.fetch_message(hlasovani_msg_id)
+            await msg.delete()
+        except: pass
+
+# ==== Ready ====
 @bot.event
 async def on_ready():
     print(f"✅ Přihlášen jako {bot.user}")
     load_pozice()
     await setup_pozice()
-    kontrola_pozic.start()
-    turnaj_notifikace.start()
-
-@bot.event
-async def on_raw_reaction_add(payload):
-    if payload.user_id == bot.user.id:
-        return
-    if payload.channel_id != CHANNEL_POZICE:
-        return
-    if str(payload.emoji) not in POZICE_EMOJI:
-        return
-
-    user_id = str(payload.user_id)
-    pozice = uzivatele_pozice.get(user_id, [])
-
-    if str(payload.emoji) in pozice:
-        return
-
-    if len(pozice) >= 2:
-        # smaže reakci
-        channel = bot.get_channel(payload.channel_id)
-        msg = await channel.fetch_message(payload.message_id)
-        member = msg.guild.get_member(payload.user_id)
-        await msg.remove_reaction(payload.emoji, member)
-        await channel.send(f"{member.mention} ❌ Už máš vybrané 2 pozice!", delete_after=5)
-        return
-
-    pozice.append(str(payload.emoji))
-    uzivatele_pozice[user_id] = pozice
-    save_pozice()
-
-    member = bot.get_channel(payload.channel_id).guild.get_member(payload.user_id)
-    if len(pozice) == 2:
-        try:
-            await member.send("✅ Díky! Úspěšně sis vybral dvě pozice. To nám usnadní sestavu!")
-        except:
-            pass
-
-    await update_nehlasujici()
-
-@bot.event
-async def on_raw_reaction_remove(payload):
-    # zabrání odstranění – pozice jsou trvalé
-    if payload.channel_id == CHANNEL_POZICE:
-        channel = bot.get_channel(payload.channel_id)
-        msg = await channel.fetch_message(payload.message_id)
-        member = msg.guild.get_member(payload.user_id)
-        await msg.add_reaction(payload.emoji)
-
-# --- Kontrola každých 30 min ---
-@tasks.loop(minutes=30)
-async def kontrola_pozic():
-    await update_nehlasujici()
-
-# --- Turnaj ---
-@tasks.loop(minutes=5)
-async def turnaj_notifikace():
-    channel = bot.get_channel(CHANNEL_TURNAJ)
-    now = datetime.utcnow().timestamp()
-    last_sent = load_last_turnaj()
-
-    if now - last_sent >= 3 * 3600:  # 3 hodiny
-        msg = await channel.send("@everyone 📢 **Dnes je turnaj proti CZ klubům!**")
-        save_last_turnaj(now)
-
-# --- Odpověď při označení ---
-@bot.event
-async def on_message(message):
-    if bot.user.mentioned_in(message) and not message.author.bot:
-        await message.channel.send(f"{message.author.mention} ✅ Jsem tady, jsem připraven!")
-    await bot.process_commands(message)
+    if not turnaj_loop.is_running():
+        turnaj_loop.start()
+    if not denni_hlasovani.is_running():
+        denni_hlasovani.start()
 
 bot.run(TOKEN)
