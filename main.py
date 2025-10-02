@@ -1,10 +1,8 @@
 import os
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, time, timedelta
 from flask import Flask
 from threading import Thread
-from groq import Groq
 
 # ==== Keep Alive server (Render) ====
 app = Flask('')
@@ -28,71 +26,102 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ==== Tokens ====
+# ==== Token ====
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
-# ==== Config ====
-CHANNEL_ID = 1396253060745007216   # kanál hlasování
-POKEC_ID = 1396254859577004253     # kanál pokec
-hlasovali_yes = set()
-hlasovali_no = set()
-hlasovaci_zprava_id = None
+# ==== ID kanálů ====
+POZICE_CHANNEL_ID = 1393525512462270564  # kanál pro pozice
 
-# ==== AI klient (jen pro odpovědi na zmínky) ====
-groq_client = Groq(api_key=GROQ_API_KEY)
+# ==== Úložiště pozic ====
+uzivatele_pozice = {}  # {user_id: [pozice1, pozice2]}
 
-async def ai_respond(prompt: str):
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=100
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"⚠️ Chyba AI: {e}"
+# ==== Možnosti pozic ====
+pozice_moznosti = {
+    "Útočník (LK, PK, HÚ, SÚ)": "⚽",
+    "Střední záložník (SOZ, SDZ)": "🎯",
+    "Krajní záložník (LZ, PZ)": "🏃",
+    "Obránce (LO, PO, SO)": "🛡️",
+    "Brankář (GK)": "🧤"
+}
 
-# ==== Turnaj každé 3 hodiny ====
-@tasks.loop(hours=3)
-async def posli_turnaj():
-    channel = bot.get_channel(POKEC_ID)
-    await channel.send("@everyone 🎮 **Dnes je turnaj (proti CZ klubům)!**")
-
-# ==== Úklid starých vtipů ====
-async def smaz_stare_vtipy():
-    channel = bot.get_channel(POKEC_ID)
+# ==== Funkce pro vypsání pozic ====
+async def vypis_pozice():
+    channel = bot.get_channel(POZICE_CHANNEL_ID)
     if not channel:
         return
-    async for msg in channel.history(limit=200):
-        if msg.author == bot.user and "😂 Vtip:" in msg.content:
-            try:
-                await msg.delete()
-            except:
-                pass
 
-# ==== Odpovědi na zmínku ====
+    # smaž všechny staré zprávy bota
+    async for msg in channel.history(limit=100):
+        if msg.author == bot.user:
+            await msg.delete()
+
+    # vytvoř embed s možnostmi
+    embed = discord.Embed(
+        title="📌 **Přečti si pozorně a vyber max. 2 pozice!**",
+        description=(
+            "Jakmile vybereš, **nejde to vrátit zpět**. ⛔\n\n"
+            "Každý hráč má možnost zvolit **primární a sekundární pozici**.\n\n"
+            "**Rozdělení pozic:**"
+        ),
+        color=discord.Color.red()
+    )
+
+    for text, emoji in pozice_moznosti.items():
+        embed.add_field(name=f"{emoji} {text}", value=" ", inline=False)
+
+    # pošli embed
+    msg = await channel.send(embed=embed)
+    for emoji in pozice_moznosti.values():
+        await msg.add_reaction(emoji)
+
+# ==== Reakce ====
 @bot.event
-async def on_message(message):
-    if message.author.bot:
+async def on_raw_reaction_add(payload):
+    if payload.channel_id != POZICE_CHANNEL_ID:
         return
-    if bot.user.mentioned_in(message):
-        reply = await ai_respond(message.content)
-        await message.channel.send(reply)
-    await bot.process_commands(message)
+    if payload.user_id == bot.user.id:
+        return
 
-# ==== Příkaz test ====
-@bot.command()
-async def test(ctx):
-    await ctx.send("✅ Bot je online a funguje.")
+    guild = bot.get_guild(payload.guild_id)
+    member = guild.get_member(payload.user_id)
+    if not member:
+        return
+
+    emoji = str(payload.emoji)
+    pozice = None
+    for text, emj in pozice_moznosti.items():
+        if emj == emoji:
+            pozice = text
+            break
+
+    if not pozice:
+        return
+
+    # Pokud už má 2 pozice, smaž reakci
+    if payload.user_id in uzivatele_pozice and len(uzivatele_pozice[payload.user_id]) >= 2:
+        channel = bot.get_channel(payload.channel_id)
+        msg = await channel.fetch_message(payload.message_id)
+        await msg.remove_reaction(emoji, member)
+        return
+
+    # Přidej pozici
+    if payload.user_id not in uzivatele_pozice:
+        uzivatele_pozice[payload.user_id] = []
+    if pozice not in uzivatele_pozice[payload.user_id]:
+        uzivatele_pozice[payload.user_id].append(pozice)
+
+    # Pokud už má 2 → pošli potvrzení do DM
+    if len(uzivatele_pozice[payload.user_id]) == 2:
+        try:
+            await member.send("✅ Díky! Vybral sis 2 pozice – to nám pomůže lépe skládat sestavu. ⚽")
+        except:
+            pass
 
 # ==== Start ====
 @bot.event
 async def on_ready():
     print(f"✅ Přihlášen jako {bot.user}")
-    await smaz_stare_vtipy()  # smaže staré vtipy
-    if not posli_turnaj.is_running():
-        posli_turnaj.start()
+    await vypis_pozice()
 
 keep_alive()
 bot.run(DISCORD_TOKEN)
