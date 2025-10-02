@@ -1,11 +1,12 @@
 import os
 import json
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 
-# ==== Keep Alive ====
+# ==== Keep Alive server ====
 app = Flask('')
 
 @app.route('/')
@@ -19,7 +20,7 @@ def keep_alive():
     t = Thread(target=run)
     t.start()
 
-# ==== Intents ====
+# ==== Discord Intents ====
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
@@ -28,118 +29,138 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==== Config ====
-DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-CHANNEL_POZICE = 1393525512462270564
-POZICE_FILE = "pozice.json"
+CHANNEL_POZICE = 1393525512462270564  # kanál pro pozice
+DATA_FILE = "pozice.json"
 
-POZICE_EMOJI = {
-    "⚽": ("Útočník", "LK/PK/HÚ/SÚ"),
-    "🎯": ("Střední záložník", "SOZ/SDZ"),
-    "🏃": ("Krajní záložník", "LZ/PZ"),
-    "🛡️": ("Obránce", "LO/PO/SO"),
-    "🧤": ("Brankář", "GK")
-}
+# ==== Global ====
+user_choices = {}       # {user_id: [emoji1, emoji2]}
+main_message_id = None  # id hlavní zprávy (embed s pozicemi)
+status_message_id = None  # id status zprávy (seznam kdo má/nemá)
 
-# ==== Save/load ====
+# ==== Ukládání ====
 def load_pozice():
-    if os.path.exists(POZICE_FILE):
-        with open(POZICE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    global user_choices, main_message_id, status_message_id
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            user_choices = data.get("user_choices", {})
+            main_message_id = data.get("main_message_id", None)
+            status_message_id = data.get("status_message_id", None)
 
 def save_pozice():
-    with open(POZICE_FILE, "w", encoding="utf-8") as f:
-        json.dump(user_choices, f)
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump({
+            "user_choices": user_choices,
+            "main_message_id": main_message_id,
+            "status_message_id": status_message_id
+        }, f, indent=2, ensure_ascii=False)
 
-user_choices = load_pozice()  # { user_id: [emoji1, emoji2] }
-main_message_id = None
-status_message_id = None
+# ==== Embed hlavní zprávy ====
+def build_main_embed():
+    embed = discord.Embed(
+        title="📌 Přečti si pozorně a vyber max. 2 pozice!",
+        description="Jakmile vybereš, **nejde to vrátit zpět. ⛔**\n\n"
+                    "Každý hráč má možnost zvolit **primární a sekundární** pozici.\n\n"
+                    "**Rozdělení pozic:**\n"
+                    "⚽ Útočník (LK, PK, HÚ, SÚ)\n"
+                    "🎯 Střední záložník (SOZ, SDZ)\n"
+                    "🏃 Krajní záložník (LZ, PZ)\n"
+                    "🛡️ Obránce (LO, PO, SO)\n"
+                    "🧤 Brankář (GK)",
+        color=discord.Color.red()
+    )
+    return embed
 
-# ==== Setup ====
-async def setup_pozice():
-    global main_message_id, status_message_id
-    channel = bot.get_channel(CHANNEL_POZICE)
-
-    # hledej původní zprávy
-    async for msg in channel.history(limit=30):
-        if msg.author == bot.user and msg.embeds and not main_message_id:
-            main_message_id = msg.id
-        elif msg.author == bot.user and not msg.embeds and not status_message_id:
-            status_message_id = msg.id
-
-    # pokud nejsou, vytvoř nové
+# ==== Synchronizace reakcí ====
+async def sync_reactions_with_choices():
+    """Načti reakce z hlavní zprávy a aktualizuj user_choices"""
+    global main_message_id
     if not main_message_id:
-        embed = discord.Embed(
-            title="📌 Přečti si pozorně a vyber max. 2 pozice!",
-            description=(
-                "Jakmile vybereš, **nejde to vrátit zpět. ⛔**\n\n"
-                "Každý hráč má možnost zvolit **primární a sekundární pozici**.\n\n"
-                "**Rozdělení pozic:**\n"
-                "⚽ Útočník (LK, PK, HÚ, SÚ)\n"
-                "🎯 Střední záložník (SOZ, SDZ)\n"
-                "🏃 Krajní záložník (LZ, PZ)\n"
-                "🛡️ Obránce (LO, PO, SO)\n"
-                "🧤 Brankář (GK)"
-            ),
-            color=discord.Color.red()
-        )
-        msg = await channel.send(embed=embed)
-        main_message_id = msg.id
-
-        # přidej reakce
-        for e in POZICE_EMOJI.keys():
-            await msg.add_reaction(e)
-
-    if not status_message_id:
-        status_msg = await channel.send("📢 Načítám seznam hráčů…")
-        status_message_id = status_msg.id
-
-    await update_status(channel.guild)
-
-async def update_status(guild):
-    """Aktualizace zprávy s přehledem hráčů"""
-    global status_message_id
-    if not status_message_id:
+        return
+    channel = bot.get_channel(CHANNEL_POZICE)
+    try:
+        main_msg = await channel.fetch_message(main_message_id)
+    except:
         return
 
+    new_choices = {}
+    for reaction in main_msg.reactions:
+        async for user in reaction.users():
+            if user.bot:
+                continue
+            new_choices.setdefault(str(user.id), []).append(str(reaction.emoji))
+
+    user_choices.clear()
+    user_choices.update(new_choices)
+    save_pozice()
+
+# ==== Update status zprávy ====
+async def update_status(guild):
+    global status_message_id
+    await sync_reactions_with_choices()
+
     channel = bot.get_channel(CHANNEL_POZICE)
-    status_msg = await channel.fetch_message(status_message_id)
+    members = [m for m in guild.members if not m.bot]
+    total = len(members)
 
-    nezvolili = []
-    hotovi = []
-    total_members = 0
-
-    for member in guild.members:
-        if member.bot:
-            continue
-        total_members += 1
-        choices = user_choices.get(str(member.id), [])
-        if len(choices) < 2:
-            nezvolili.append(f"{member.mention} ({len(choices)}/2)")
+    done = []
+    not_done = []
+    for m in members:
+        choices = user_choices.get(str(m.id), [])
+        if len(choices) >= 2:
+            done.append(f"{m.mention} ✅ ({', '.join(choices)})")
         else:
-            pozice_names = [POZICE_EMOJI[e][1] for e in choices]
-            hotovi.append(f"{member.mention} ✅ ({', '.join(pozice_names)})")
+            not_done.append(f"{m.mention} ({len(choices)}/2)")
 
     text = ""
-    if nezvolili:
-        text += "📢 Tito hráči ještě nemají 2 pozice:\n" + ", ".join(nezvolili) + "\n\n"
-    if hotovi:
-        text += "✅ Už vybrali: \n" + ", ".join(hotovi) + "\n\n"
+    if not_done:
+        text += "📢 Tito hráči ještě nemají 2 pozice:\n" + ", ".join(not_done) + "\n\n"
+    if done:
+        text += "✅ Už vybrali:\n" + ", ".join(done) + "\n\n"
 
-    text += f"📊 Statistika: {len(hotovi)}/{total_members} hráčů má vybrané 2 pozice."
+    text += f"📊 Statistika: {len(done)}/{total} hráčů má vybrané 2 pozice."
 
-    await status_msg.edit(content=text)
+    # aktualizace / vytvoření zprávy
+    if status_message_id:
+        try:
+            msg = await channel.fetch_message(status_message_id)
+            await msg.edit(content=text)
+            return
+        except:
+            pass
 
-# ==== Eventy ====
+    msg = await channel.send("⏳ Načítám seznam hráčů...")
+    status_message_id = msg.id
+    save_pozice()
+    await msg.edit(content=text)
+
+# ==== Setup při spuštění ====
+async def setup_pozice():
+    global main_message_id
+    channel = bot.get_channel(CHANNEL_POZICE)
+
+    if not main_message_id:
+        embed = build_main_embed()
+        msg = await channel.send(embed=embed)
+        main_message_id = msg.id
+        save_pozice()
+
+        # přidej emoji pro volby
+        emojis = ["⚽", "🎯", "🏃", "🛡️", "🧤"]
+        for e in emojis:
+            await msg.add_reaction(e)
+
+# ==== Events ====
 @bot.event
 async def on_ready():
     print(f"✅ Přihlášen jako {bot.user}")
+    load_pozice()
     await setup_pozice()
+    await update_status(bot.guilds[0])
 
 @bot.event
 async def on_raw_reaction_add(payload):
-    global user_choices
-    if payload.message_id != main_message_id:
+    if payload.channel_id != CHANNEL_POZICE:
         return
     if payload.user_id == bot.user.id:
         return
@@ -147,49 +168,38 @@ async def on_raw_reaction_add(payload):
     user_id = str(payload.user_id)
     emoji = str(payload.emoji)
 
-    if user_id not in user_choices:
-        user_choices[user_id] = []
-
-    # pokud už má 2 a chce třetí → blok
-    if len(user_choices[user_id]) >= 2 and emoji not in user_choices[user_id]:
+    choices = user_choices.get(user_id, [])
+    if emoji not in choices:
+        choices.append(emoji)
+    if len(choices) > 2:
+        # smaž tu třetí reakci
         channel = bot.get_channel(payload.channel_id)
         msg = await channel.fetch_message(payload.message_id)
-        user = payload.member
-        await msg.remove_reaction(emoji, user)
-        try:
-            await user.send("❌ Už máš vybrané 2 pozice, další přidat nemůžeš.")
-        except:
-            pass
+        await msg.remove_reaction(payload.emoji, payload.member)
         return
 
-    if emoji not in user_choices[user_id]:
-        user_choices[user_id].append(emoji)
-
+    user_choices[user_id] = choices
     save_pozice()
-
-    user = payload.member
-    if len(user_choices[user_id]) == 1:
-        await user.send(f"👉 Máš vybranou 1. pozici: **{POZICE_EMOJI[emoji][0]}**")
-    elif len(user_choices[user_id]) == 2:
-        await user.send("✅ Máš vybrané 2 pozice, děkujeme!")
-
-    await update_status(user.guild)
+    await update_status(payload.member.guild)
 
 @bot.event
 async def on_raw_reaction_remove(payload):
+    if payload.channel_id != CHANNEL_POZICE:
+        return
+    if payload.user_id == bot.user.id:
+        return
+
     user_id = str(payload.user_id)
     emoji = str(payload.emoji)
 
-    if payload.message_id != main_message_id or user_id == str(bot.user.id):
-        return
-
-    if user_id in user_choices and emoji in user_choices[user_id]:
-        user_choices[user_id].remove(emoji)
+    choices = user_choices.get(user_id, [])
+    if emoji in choices:
+        choices.remove(emoji)
+        user_choices[user_id] = choices
         save_pozice()
-
-    guild = bot.get_guild(payload.guild_id)
-    await update_status(guild)
+        guild = bot.get_guild(payload.guild_id)
+        await update_status(guild)
 
 # ==== Start ====
 keep_alive()
-bot.run(DISCORD_TOKEN)
+bot.run(os.environ["DISCORD_TOKEN"])
