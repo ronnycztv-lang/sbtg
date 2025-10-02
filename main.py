@@ -5,7 +5,6 @@ from datetime import datetime, time, timedelta
 from flask import Flask
 from threading import Thread
 from groq import Groq
-import json
 
 # ==== Keep Alive server (Render) ====
 app = Flask('')
@@ -40,7 +39,7 @@ hlasovali_yes = set()
 hlasovali_no = set()
 hlasovaci_zprava_id = None
 
-# ==== AI klient (zůstává, pro odpovědi na zmínky) ====
+# ==== AI klient (jen pro odpovědi na zmínky) ====
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 async def ai_respond(prompt: str):
@@ -54,90 +53,23 @@ async def ai_respond(prompt: str):
     except Exception as e:
         return f"⚠️ Chyba AI: {e}"
 
-# ==== Denní hlasování ====
-def je_cas(target_time):
-    now = datetime.utcnow() + timedelta(hours=2)
-    return now.hour == target_time.hour and now.minute == target_time.minute
-
-async def posli_souhrn(channel, guild, nadpis="📊 Souhrn hlasování"):
-    hlasujici_yes = [m.mention for m in guild.members if not m.bot and m.id in hlasovali_yes]
-    hlasujici_no = [m.mention for m in guild.members if not m.bot and m.id in hlasovali_no]
-    nehlasujici = [m.mention for m in guild.members if not m.bot and m.id not in hlasovali_yes and m.id not in hlasovali_no]
-
-    report = f"{nadpis}\n\n"
-    report += f"👍 Půjdou: {', '.join(hlasujici_yes) if hlasujici_yes else 'Nikdo'}\n"
-    report += f"❌ Nepůjdou: {', '.join(hlasujici_no) if hlasujici_no else 'Nikdo'}\n"
-    report += f"❓ Nehlasovali: {', '.join(nehlasujici) if nehlasujici else 'Nikdo'}"
-
-    await channel.send(report)
-
-@tasks.loop(minutes=1)
-async def denni_hlasovani():
-    global hlasovaci_zprava_id, hlasovali_yes, hlasovali_no
-    now = datetime.utcnow() + timedelta(hours=2)
-    channel = bot.get_channel(CHANNEL_ID)
-    guild = channel.guild
-
-    if je_cas(time(7,0)):
-        if hlasovaci_zprava_id:
-            await posli_souhrn(channel, guild, "📊 Ranní souhrn v 07:00")
-            hlasovaci_zprava_id = None
-            hlasovali_yes.clear()
-            hlasovali_no.clear()
-
-    if je_cas(time(8,0)):
-        msg = await channel.send("🗳️ **Hlasování o účasti na tréninku!**\n👍 = Jdu\n❌ = Nejdů")
-        await msg.add_reaction("👍")
-        await msg.add_reaction("❌")
-        hlasovaci_zprava_id = msg.id
-        hlasovali_yes.clear()
-        hlasovali_no.clear()
-
-    if je_cas(time(16,0)) or je_cas(time(17,0)) or je_cas(time(18,0)):
-        nehlasujici = [m.mention for m in guild.members if not m.bot and m.id not in hlasovali_yes and m.id not in hlasovali_no]
-        if nehlasujici:
-            await channel.send(f"⏰ Připomínka! Ještě nehlasovali: {', '.join(nehlasujici)}")
-
-    if je_cas(time(19,0)):
-        nehlasujici = [m.mention for m in guild.members if not m.bot and m.id not in hlasovali_yes and m.id not in hlasovali_no]
-        if nehlasujici:
-            await channel.send(f"⚠️ Poslední výzva před tréninkem! Nehlasovali: {', '.join(nehlasujici)}")
-
-    if je_cas(time(21,0)) and hlasovaci_zprava_id:
-        await posli_souhrn(channel, guild, "📊 Večerní souhrn ve 21:00")
-        try:
-            msg = await channel.fetch_message(hlasovaci_zprava_id)
-            await msg.delete()
-        except:
-            await channel.send("⚠️ Nepodařilo se smazat hlasovací zprávu.")
-        hlasovaci_zprava_id = None
-
-# ==== TURNaj místo vtipu každé 3 hodiny ====
+# ==== Turnaj každé 3 hodiny ====
 @tasks.loop(hours=3)
 async def posli_turnaj():
     channel = bot.get_channel(POKEC_ID)
-    await channel.send("🎮 **Dnes je turnaj (proti CZ klubům)!**")
+    await channel.send("@everyone 🎮 **Dnes je turnaj (proti CZ klubům)!**")
 
-# ==== Reakce na emoji v hlasování ====
-@bot.event
-async def on_raw_reaction_add(payload):
-    global hlasovali_yes, hlasovali_no
-    if payload.channel_id == CHANNEL_ID and payload.emoji.name in ["👍", "❌"]:
-        if payload.emoji.name == "👍":
-            hlasovali_yes.add(payload.user_id)
-            hlasovali_no.discard(payload.user_id)
-        elif payload.emoji.name == "❌":
-            hlasovali_no.add(payload.user_id)
-            hlasovali_yes.discard(payload.user_id)
-
-@bot.event
-async def on_raw_reaction_remove(payload):
-    global hlasovali_yes, hlasovali_no
-    if payload.channel_id == CHANNEL_ID and payload.emoji.name in ["👍", "❌"]:
-        if payload.emoji.name == "👍":
-            hlasovali_yes.discard(payload.user_id)
-        elif payload.emoji.name == "❌":
-            hlasovali_no.discard(payload.user_id)
+# ==== Úklid starých vtipů ====
+async def smaz_stare_vtipy():
+    channel = bot.get_channel(POKEC_ID)
+    if not channel:
+        return
+    async for msg in channel.history(limit=200):
+        if msg.author == bot.user and "😂 Vtip:" in msg.content:
+            try:
+                await msg.delete()
+            except:
+                pass
 
 # ==== Odpovědi na zmínku ====
 @bot.event
@@ -149,7 +81,7 @@ async def on_message(message):
         await message.channel.send(reply)
     await bot.process_commands(message)
 
-# ==== Testovací příkaz ====
+# ==== Příkaz test ====
 @bot.command()
 async def test(ctx):
     await ctx.send("✅ Bot je online a funguje.")
@@ -158,8 +90,7 @@ async def test(ctx):
 @bot.event
 async def on_ready():
     print(f"✅ Přihlášen jako {bot.user}")
-    if not denni_hlasovani.is_running():
-        denni_hlasovani.start()
+    await smaz_stare_vtipy()  # smaže staré vtipy
     if not posli_turnaj.is_running():
         posli_turnaj.start()
 
