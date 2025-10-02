@@ -49,7 +49,7 @@ async def posli_souhrn(channel, guild, nadpis="📊 Souhrn hlasování"):
 async def ai_response(prompt: str) -> str:
     try:
         response = client.chat.completions.create(
-            model="llama3-70b-8192",
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200
         )
@@ -169,3 +169,4 @@ async def on_ready():
         posli_vtip.start()
 
 bot.run(DISCORD_TOKEN)
+
